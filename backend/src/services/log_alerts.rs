@@ -99,10 +99,59 @@ async fn ingest_log(
 ) -> Result<Json<serde_json::Value>, AppError> {
     tracing::info!("Processing log: {}", log.message);
     
-    // In a real system, we would match against rules cached in Redis
-    // and use Redis to track counts over time.
+    // 1. Fetch all enabled rules
+    let rules = sqlx::query_as::<_, LogAlertRule>(
+        "SELECT * FROM log_alert_rules WHERE is_enabled = true"
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    let mut matched_rules = Vec::new();
+
+    for rule in rules {
+        if log.message.contains(&rule.pattern) {
+            tracing::debug!("Log matched pattern for rule: {}", rule.name);
+            
+            // 2. Increment count in Redis with TTL
+            let redis_key = format!("alert_count:{}:{}", rule.id, chrono::Utc::now().timestamp() / rule.interval_seconds as i64);
+            let mut conn = state.redis.get_async_connection().await?;
+            
+            let count: i32 = redis::cmd("INCR")
+                .arg(&redis_key)
+                .query_async(&mut conn)
+                .await?;
+            
+            // Set TTL if new key
+            if count == 1 {
+                let _: () = redis::cmd("EXPIRE")
+                    .arg(&redis_key)
+                    .arg(rule.interval_seconds)
+                    .query_async(&mut conn)
+                    .await?;
+            }
+
+            // 3. Check if threshold reached
+            if count >= rule.threshold {
+                tracing::warn!("Threshold reached for rule: {}. Triggering alert!", rule.name);
+                
+                // 4. Persist alert
+                sqlx::query(
+                    "INSERT INTO log_alerts (rule_id, message) VALUES ($1, $2)"
+                )
+                .bind(rule.id)
+                .bind(format!("Threshold of {} reached for pattern '{}'", rule.threshold, rule.pattern))
+                .execute(&state.db)
+                .await?;
+                
+                matched_rules.push(rule.name);
+            }
+        }
+    }
     
-    Ok(Json(serde_json::json!({ "status": "processed" })))
+    Ok(Json(serde_json::json!({ 
+        "status": "processed",
+        "matched": matched_rules
+    })))
 }
 
 #[cfg(test)]
