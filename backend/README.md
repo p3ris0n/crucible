@@ -379,6 +379,27 @@ The backend runs several background workers for system health and data consisten
 - `src/jobs/` – Background job definitions (Apalis)
 - `src/services/` – Business logic and external integrations
 - `src/telemetry/` – Observability and logging setup
+
+## Build Request Deduplication
+
+The backend includes a build request deduplication service in `src/services/dedup.rs`.
+It fingerprints build submissions with SHA-256, uses Redis `SET NX EX` for fast
+in-flight duplicate suppression, persists accepted fingerprints in PostgreSQL,
+and enqueues accepted requests into a Redis list for build workers.
+
+The service exposes an Axum router for `POST /build-requests` when mounted by the
+application. Duplicate submissions return `duplicate` or `in_progress` decisions
+instead of enqueueing repeated build work.
+
+Schema is managed by `migrations/20260528010000_build_request_dedup.sql`. The
+service also exposes `BuildDedupService::ensure_schema` for isolated integration
+tests that need to provision the table directly.
+
+## Test Fixture Factory
+
+`src/test_utils/factories.rs` provides `FixtureFactory` and `TestFixture` for
+creating related users, products, orders, and sessions in tests. Existing
+domain-specific factories remain available.
 - `src/utils/` – Serialization, validation, XDR helpers
 - `src/test_utils/` – Mock traits for unit testing
 

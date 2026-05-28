@@ -1,4 +1,5 @@
 pub mod log_alerts;
+pub mod dedup;
 pub mod alerts;
 pub mod error_recovery;
 pub mod feature_flags;
