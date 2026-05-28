@@ -26,21 +26,45 @@ harness = false
 testutils = ["mockall"]
 
 [dependencies]
+# Web framework
 axum = { version = "0.7", features = ["macros"] }
-tokio = { version = "1", features = ["full"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json", "migrate", "macros"] }
-redis = { version = "0.27", features = ["tokio-comp", "json", "connection-manager"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-thiserror = "1.0"
-chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1.0", features = ["v4", "serde"] }
-dotenvy = "0.15"
 tower = { version = "0.5", features = ["full", "util"] }
 tower-http = { version = "0.5", features = ["cors", "trace", "compression-gzip", "request-id"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Database (Keep 0.8 from feature branch)
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json", "migrate", "macros"] }
+
+# Redis (Keep 0.27 from feature branch)
+redis = { version = "0.27", features = ["tokio-comp", "json", "connection-manager"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# OpenTelemetry (Upgrade to 0.31+ from main branch)
+opentelemetry = { version = "0.31", features = ["trace"] }
+opentelemetry_sdk = { version = "0.31", features = ["trace", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "http-proto", "reqwest-client"] }
+tracing-opentelemetry = { version = "0.32", default-features = false }
+opentelemetry-semantic-conventions = "0.16"
+
+# Utilities
+uuid = { version = "1.0", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+dotenvy = "0.15"
+thiserror = "1.0"
 anyhow = "1.0"
+config = "0.14.0"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+# External Integrations
 utoipa = { version = "5.0", features = ["axum_extras", "chrono", "uuid"] }
 utoipa-swagger-ui = { version = "8.0", features = ["axum"] }
 apalis = { version = "0.6" }
@@ -50,14 +74,6 @@ stellar-xdr = { version = "21.0", features = ["std"] }
 base64 = "0.22"
 validator = { version = "0.19", features = ["derive"] }
 tower_governor = "0.4"
-opentelemetry = { version = "0.24", features = ["trace", "metrics"] }
-opentelemetry_sdk = { version = "0.24", features = ["trace", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.17", features = ["trace", "grpc-tonic", "http-proto", "reqwest-client"] }
-tracing-opentelemetry = "0.25"
-opentelemetry-semantic-conventions = "0.16"
-tonic = "0.12"
-futures-util = { version = "0.3", default-features = false, features = ["std"] }
-config = "0.14.0"
 mockall = { version = "0.13", optional = true }
 
 [dev-dependencies]
@@ -73,6 +89,7 @@ rust_decimal_macros = "1.35"
 criterion = { version = "0.5", features = ["async_tokio"] }
 temp-env = "0.3.6"
 toml = "0.8.12"
+http-body-util = "0.1"
 
 [profile.release]
 opt-level = 3
