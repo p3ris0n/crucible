@@ -5,11 +5,19 @@
 //! small: writes are O(1), bounded list queries are O(limit), and summaries run
 //! indexed aggregate queries over the requested namespace/time window.
 
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
+};
 use chrono::{DateTime, Utc};
 use redis::{AsyncCommands, Client as RedisClient};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
 use std::collections::HashMap;
+use std::sync::Arc;
 use thiserror::Error;
 use tracing::{debug, error, info, instrument};
 use uuid::Uuid;
@@ -36,6 +44,33 @@ pub enum CacheMetricsError {
     /// The caller supplied an invalid analytics request.
     #[error("validation error: {0}")]
     Validation(String),
+}
+
+impl IntoResponse for CacheMetricsError {
+    fn into_response(self) -> Response {
+        let status = match self {
+            Self::Validation(_) => StatusCode::BAD_REQUEST,
+            Self::Database(_) | Self::Redis(_) | Self::Serialization(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        };
+
+        if status.is_server_error() {
+            error!(error = %self, "cache metrics request failed");
+        }
+
+        (
+            status,
+            Json(serde_json::json!({
+                "error": self.to_string(),
+                "code": match status {
+                    StatusCode::BAD_REQUEST => "VALIDATION_ERROR",
+                    _ => "CACHE_METRICS_ERROR",
+                },
+            })),
+        )
+            .into_response()
+    }
 }
 
 /// Cache operation names tracked by the analytics service.
@@ -213,12 +248,62 @@ pub struct CacheMetricsSummary {
     pub generated_at: DateTime<Utc>,
 }
 
+/// Shared Axum state for cache metrics routes.
+#[derive(Clone)]
+pub struct CacheMetricsState {
+    pub service: Arc<CacheMetricsService>,
+}
+
 /// Service for durable cache metrics and cached analytics summaries.
 #[derive(Clone)]
 pub struct CacheMetricsService {
     db: PgPool,
     redis: RedisClient,
     summary_cache_ttl_secs: u64,
+}
+
+/// Builds the cache metrics HTTP router.
+///
+/// Routes are intentionally small and delegate all persistence, caching, and
+/// validation to [`CacheMetricsService`].
+pub fn router(service: Arc<CacheMetricsService>) -> Router {
+    Router::new()
+        .route(
+            "/cache-metrics",
+            post(record_cache_metric).get(get_recent_cache_metrics),
+        )
+        .route("/cache-metrics/summary", get(get_cache_metrics_summary))
+        .with_state(CacheMetricsState { service })
+}
+
+/// `POST /cache-metrics` records a cache operation.
+#[instrument(skip(state, payload))]
+pub async fn record_cache_metric(
+    State(state): State<CacheMetricsState>,
+    Json(payload): Json<CacheMetricInput>,
+) -> Result<impl IntoResponse, CacheMetricsError> {
+    let metric = state.service.record(payload).await?;
+    Ok((StatusCode::CREATED, Json(metric)))
+}
+
+/// `GET /cache-metrics` returns recent cache operations.
+#[instrument(skip(state))]
+pub async fn get_recent_cache_metrics(
+    State(state): State<CacheMetricsState>,
+    Query(query): Query<CacheMetricsQuery>,
+) -> Result<impl IntoResponse, CacheMetricsError> {
+    let metrics = state.service.recent(query).await?;
+    Ok(Json(metrics))
+}
+
+/// `GET /cache-metrics/summary` returns aggregate cache analytics.
+#[instrument(skip(state))]
+pub async fn get_cache_metrics_summary(
+    State(state): State<CacheMetricsState>,
+    Query(query): Query<CacheMetricsQuery>,
+) -> Result<impl IntoResponse, CacheMetricsError> {
+    let summary = state.service.summary(query).await?;
+    Ok(Json(summary))
 }
 
 impl CacheMetricsService {
@@ -545,6 +630,12 @@ fn validate_name(field: &str, value: &str) -> Result<(), CacheMetricsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        body::{to_bytes, Body},
+        http::{Method, Request, StatusCode},
+    };
+    use sqlx::postgres::PgPoolOptions;
+    use tower::ServiceExt;
 
     #[test]
     fn cache_operation_round_trips() {
@@ -622,5 +713,122 @@ mod tests {
             summary_cache_key(&query),
             "cache_metrics:summary:dashboard:0:0"
         );
+    }
+
+    #[test]
+    fn cache_metrics_error_maps_validation_to_bad_request() {
+        let response =
+            CacheMetricsError::Validation("invalid namespace".to_string()).into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn router_rejects_invalid_record_payload_before_io() {
+        let app = router(test_service());
+        let payload = serde_json::json!({
+            "namespace": "bad namespace",
+            "cache_key": "dashboard",
+            "operation": "get",
+            "hit": true,
+            "latency_ms": 4,
+            "payload_bytes": null,
+            "metadata": {}
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/cache-metrics")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["code"], "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn router_rejects_invalid_recent_query_before_io() {
+        let app = router(test_service());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/cache-metrics?limit=1001")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn integration_records_and_summarizes_with_postgres_and_redis() {
+        dotenvy::dotenv().ok();
+        let database_url = std::env::var("DATABASE_URL")
+            .expect("DATABASE_URL is required for cache metrics integration test");
+        let redis_url =
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+
+        let db = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await
+            .unwrap();
+        let redis = RedisClient::open(redis_url).unwrap();
+        let service = Arc::new(CacheMetricsService::with_summary_cache_ttl(db, redis, 1));
+        service.ensure_schema().await.unwrap();
+
+        let app = router(service);
+        let payload = serde_json::json!({
+            "namespace": "integration",
+            "cache_key": "summary",
+            "operation": "get",
+            "hit": true,
+            "latency_ms": 3,
+            "payload_bytes": 128,
+            "metadata": {"source": "test"}
+        });
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/cache-metrics")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/cache-metrics/summary?namespace=integration")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    fn test_service() -> Arc<CacheMetricsService> {
+        let db = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cache_metrics_test")
+            .unwrap();
+        let redis = RedisClient::open("redis://127.0.0.1:1").unwrap();
+        Arc::new(CacheMetricsService::new(db, redis))
     }
 }

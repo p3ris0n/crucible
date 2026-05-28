@@ -457,6 +457,9 @@ The backend runs several background workers for system health and data consisten
 | `GET` | `/api/v1/profiling/health` | Service health check (OpenAPI) |
 | `GET` | `/api/v1/dashboard/metrics` | Dashboard aggregated metrics with Redis caching |
 | `GET` | `/api/v1/dashboard/contracts/:contract_id/stats` | Contract-specific statistics |
+| `POST` | `/cache-metrics` | Record a cache operation metric |
+| `GET` | `/cache-metrics` | List recent cache operation metrics |
+| `GET` | `/cache-metrics/summary` | Cache hit/miss, latency, payload, and operation analytics |
 | `GET` | `/api/v1/profiling/prometheus` | Prometheus-compatible metrics |
 | `GET` | `/api/status` | System health summary and recovery status |
 | `POST` | `/api/profile` | Trigger a manual profiling collection run |
@@ -875,6 +878,7 @@ The `cache_metrics` module records cache operations as durable PostgreSQL events
 - `CacheMetricsService::recent(query)` - Read bounded recent cache events
 - `CacheMetricsService::summary(query)` - Return hit/miss counts, hit rate, latency, payload totals, and operation breakdowns
 - `CacheMetricsService::ensure_schema()` - Create the table and indexes for tests or embedded deployments
+- `router(service)` - Build Axum routes for recording and reading cache analytics
 
 ## Backup Service Configuration
 
